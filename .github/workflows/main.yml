@@ -2,6 +2,18 @@ name: Capture Twitch Clip
 
 on:
   workflow_dispatch:
+    inputs:
+      start_time:
+        description: "Start time in HH:MM:SS format (e.g. 00:40:00)"
+        required: true
+        type: string
+        default: "00:40:00"
+
+      duration:
+        description: "Clip duration in seconds (e.g. 30)"
+        required: true
+        type: number
+        default: 30
 
 permissions:
   contents: write
@@ -21,16 +33,35 @@ jobs:
           sudo apt-get install -y ffmpeg
           python -m pip install --upgrade streamlink
 
+      - name: Validate inputs
+        env:
+          START_TIME: ${{ inputs.start_time }}
+          DURATION: ${{ inputs.duration }}
+        run: |
+          set -euo pipefail
+
+          if ! [[ "$START_TIME" =~ ^[0-9]{2,}:[0-5][0-9]:[0-5][0-9]$ ]]; then
+            echo "Start time must use HH:MM:SS format."
+            exit 1
+          fi
+
+          if ! [[ "$DURATION" =~ ^[0-9]+$ ]] || (( DURATION < 1 || DURATION > 300 )); then
+            echo "Duration must be between 1 and 300 seconds."
+            exit 1
+          fi
+
       - name: Capture Twitch segment
-        timeout-minutes: 5
+        timeout-minutes: 10
         env:
           CHANNEL: https://www.twitch.tv/humzh
+          START_TIME: ${{ inputs.start_time }}
+          DURATION: ${{ inputs.duration }}
         run: |
           set -euo pipefail
 
           streamlink \
-            --hls-start-offset 01:20:00 \
-            --stream-segmented-duration 30 \
+            --hls-start-offset "$START_TIME" \
+            --stream-segmented-duration "$DURATION" \
             "$CHANNEL" \
             480p30 \
             -o /tmp/capture.ts
@@ -38,31 +69,44 @@ jobs:
           test -s /tmp/capture.ts
 
       - name: Convert to MP4
+        env:
+          START_TIME: ${{ inputs.start_time }}
+          DURATION: ${{ inputs.duration }}
         run: |
+          set -euo pipefail
           mkdir -p clips
+
+          SAFE_TIME="${START_TIME//:/m}"
+          SAFE_TIME="${SAFE_TIME}s"
+
+          OUTPUT="clips/humzh_${SAFE_TIME}_${DURATION}s.mp4"
 
           ffmpeg -y \
             -i /tmp/capture.ts \
-            -t 30 \
+            -t "$DURATION" \
             -c:v libx264 \
             -preset veryfast \
             -crf 23 \
             -c:a aac \
             -movflags +faststart \
-            clips/humzh_40m00s_40m30s.mp4
+            "$OUTPUT"
 
-          test -s clips/humzh_40m00s_40m30s.mp4
+          test -s "$OUTPUT"
+
+          echo "OUTPUT=$OUTPUT" >> "$GITHUB_ENV"
 
       - name: Commit video to repository
         run: |
+          set -euo pipefail
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add clips/humzh_40m00s_40m30s.mp4
+          git add "$OUTPUT"
 
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "Add humzh Twitch clip"
+            git commit -m "Add Twitch clip: $OUTPUT"
             git push
           fi
