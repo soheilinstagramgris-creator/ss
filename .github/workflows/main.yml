@@ -1,4 +1,3 @@
-
 name: Capture Twitch Clip
 
 on:
@@ -16,58 +15,43 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install tools
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg python3-pip
-          python3 -m pip install --user --break-system-packages streamlink
+          sudo apt-get install -y ffmpeg
+          python -m pip install --upgrade streamlink
 
-      - name: Capture requested segment
-        shell: bash
+      - name: Capture Twitch segment
+        env:
+          CHANNEL: https://www.twitch.tv/humzh
         run: |
           set -euo pipefail
 
-          CHANNEL="https://www.twitch.tv/humzh"
-          mkdir -p clips
-
-          STREAMLINK="$HOME/.local/bin/streamlink"
-
-          # Target: broadcast time 00:40:00 to 00:40:30.
-          # Query Twitch for the currently available stream quality.
-          "$STREAMLINK" "$CHANNEL" --stream-url > /tmp/stream_url.txt || {
-            echo "Could not obtain a live stream URL."
-            exit 1
-          }
-
-          URL="$(head -n 1 /tmp/stream_url.txt)"
-
-          if [ -z "$URL" ]; then
-            echo "No stream URL returned."
-            exit 1
-          fi
-
-          # This is a best-effort rewind relative to the live edge.
-          # Assumes the broadcast is currently around 2 hours long.
-          "$STREAMLINK" \
+          streamlink \
             --hls-start-offset 01:20:00 \
-            --stream-segmented-duration 30 \
-            "$CHANNEL" 480p \
+            "$CHANNEL" \
+            480p30 \
             -o /tmp/capture.ts
 
           test -s /tmp/capture.ts
 
-          # Normalize to 480p and exactly 30 seconds.
-          ffmpeg -y -i /tmp/capture.ts \
+      - name: Convert to MP4
+        run: |
+          mkdir -p clips
+
+          ffmpeg -y \
+            -i /tmp/capture.ts \
             -t 30 \
-            -vf "scale=-2:480" \
-            -c:v libx264 -preset veryfast -crf 27 \
-            -c:a aac -b:a 96k \
+            -c:v libx264 \
+            -preset veryfast \
+            -crf 23 \
+            -c:a aac \
             -movflags +faststart \
             clips/humzh_40m00s_40m30s.mp4
 
           test -s clips/humzh_40m00s_40m30s.mp4
 
-      - name: Commit clip
+      - name: Commit video to repository
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -75,10 +59,8 @@ jobs:
           git add clips/humzh_40m00s_40m30s.mp4
 
           if git diff --cached --quiet; then
-            echo "No new clip to commit."
-            exit 1
+            echo "No changes to commit."
+          else
+            git commit -m "Add humzh Twitch clip"
+            git push
           fi
-
-          git commit -m "Add Humzh Twitch clip"
-          git push
-          
