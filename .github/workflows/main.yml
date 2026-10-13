@@ -1,27 +1,15 @@
-name: Capture Twitch Clip
+name: Record Twitch Broadcast
 
 on:
   workflow_dispatch:
-    inputs:
-      start_time:
-        description: "Start time in HH:MM:SS format (e.g. 00:40:00)"
-        required: true
-        type: string
-        default: "00:40:00"
-
-      duration:
-        description: "Clip duration in seconds (e.g. 30)"
-        required: true
-        type: number
-        default: 30
 
 permissions:
   contents: write
 
 jobs:
-  capture:
+  record:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 350
 
     steps:
       - name: Checkout repository
@@ -33,80 +21,64 @@ jobs:
           sudo apt-get install -y ffmpeg
           python -m pip install --upgrade streamlink
 
-      - name: Validate inputs
-        env:
-          START_TIME: ${{ inputs.start_time }}
-          DURATION: ${{ inputs.duration }}
-        run: |
-          set -euo pipefail
-
-          if ! [[ "$START_TIME" =~ ^[0-9]{2,}:[0-5][0-9]:[0-5][0-9]$ ]]; then
-            echo "Start time must use HH:MM:SS format."
-            exit 1
-          fi
-
-          if ! [[ "$DURATION" =~ ^[0-9]+$ ]] || (( DURATION < 1 || DURATION > 300 )); then
-            echo "Duration must be between 1 and 300 seconds."
-            exit 1
-          fi
-
-      - name: Capture Twitch segment
-        timeout-minutes: 10
+      - name: Record and commit broadcast
+        timeout-minutes: 345
         env:
           CHANNEL: https://www.twitch.tv/humzh
-          START_TIME: ${{ inputs.start_time }}
-          DURATION: ${{ inputs.duration }}
         run: |
           set -euo pipefail
 
-          streamlink \
-            --hls-start-offset "$START_TIME" \
-            --stream-segmented-duration "$DURATION" \
-            "$CHANNEL" \
-            480p30 \
-            -o /tmp/capture.ts
-
-          test -s /tmp/capture.ts
-
-      - name: Convert to MP4
-        env:
-          START_TIME: ${{ inputs.start_time }}
-          DURATION: ${{ inputs.duration }}
-        run: |
-          set -euo pipefail
-          mkdir -p clips
-
-          SAFE_TIME="${START_TIME//:/m}"
-          SAFE_TIME="${SAFE_TIME}s"
-
-          OUTPUT="clips/humzh_${SAFE_TIME}_${DURATION}s.mp4"
-
-          ffmpeg -y \
-            -i /tmp/capture.ts \
-            -t "$DURATION" \
-            -c:v libx264 \
-            -preset veryfast \
-            -crf 23 \
-            -c:a aac \
-            -movflags +faststart \
-            "$OUTPUT"
-
-          test -s "$OUTPUT"
-
-          echo "OUTPUT=$OUTPUT" >> "$GITHUB_ENV"
-
-      - name: Commit video to repository
-        run: |
-          set -euo pipefail
+          mkdir -p recordings
+          SEGMENT=1
 
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add "$OUTPUT"
+          while true; do
+            printf -v NUMBER "%04d" "$SEGMENT"
+            TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
 
-          if git diff --cached --quiet; then
-            echo "No changes to commit."
-          else
-            git commit -m "Add Twitch clip: $OUTPUT"
+            echo "Recording segment $NUMBER"
+
+            rm -f /tmp/segment.ts
+
+            if ! streamlink \
+              --retry-streams 1 \
+              --stream-segmented-duration 300 \
+              "$CHANNEL" \
+              480p30 \
+              -o /tmp/segment.ts; then
+              echo "Stream ended or capture failed."
+              break
+            fi
+
+            if [[ ! -s /tmp/segment.ts ]]; then
+              echo "No video captured. Stopping."
+              break
+            fi
+
+            OUTPUT="recordings/humzh_${NUMBER}_${TIMESTAMP}.mp4"
+
+            ffmpeg -y \
+              -i /tmp/segment.ts \
+              -c:v libx264 \
+              -preset veryfast \
+              -crf 23 \
+              -c:a aac \
+              -movflags +faststart \
+              "$OUTPUT"
+
+            if [[ ! -s "$OUTPUT" ]]; then
+              echo "MP4 conversion failed."
+              exit 1
+            fi
+
+            git add "$OUTPUT"
+            git commit -m "Add Twitch recording segment $NUMBER"
             git push
-          fi
+
+            echo "Committed $OUTPUT"
+
+            SEGMENT=$((SEGMENT + 1))
+          done
