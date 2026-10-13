@@ -9,7 +9,7 @@ permissions:
 jobs:
   capture:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -22,6 +22,7 @@ jobs:
           python -m pip install --upgrade streamlink
 
       - name: Capture Twitch segment
+        timeout-minutes: 5
         env:
           CHANNEL: https://www.twitch.tv/humzh
         run: |
@@ -29,6 +30,7 @@ jobs:
 
           streamlink \
             --hls-start-offset 01:20:00 \
+            --stream-segmented-duration 30 \
             "$CHANNEL" \
             480p30 \
             -o /tmp/capture.ts
