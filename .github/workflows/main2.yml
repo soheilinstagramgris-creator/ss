@@ -1,0 +1,117 @@
+name: newr from Stream Start – Flexible Segments (Quality Choice)
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel_name:
+        description: 'Twitch channel name (e.g., "agurin")'
+        required: true
+      quality:
+        description: 'Video quality'
+        required: true
+        default: '720p'
+        type: choice
+        options:
+          - '480p'
+          - '720p'
+          - '1080p'
+          - 'Source (best)'
+      segment_minutes:
+        description: 'Length of each segment in minutes (e.g., 5, 10, 15)'
+        required: true
+        default: '10'
+      max_segments:
+        description: 'Number of segments to record (0 = until stream ends)'
+        default: '0'
+      start_minutes:
+        description: 'Start from this minute offset (e.g., 40 to skip first 40 minutes)'
+        default: '0'
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create folder
+        id: folder
+        run: |
+          TS=$(date +'%m%d%H%M%S')
+          FOLDER_NAME="${TS}_${QUALITY}_from_${START_MIN}min"
+          echo "name=$FOLDER_NAME" >> $GITHUB_OUTPUT
+          mkdir -p "$FOLDER_NAME"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+        env:
+          QUALITY: ${{ github.event.inputs.quality }}
+          START_MIN: ${{ github.event.inputs.start_minutes }}
+
+      - name: Install yt-dlp and ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          pip install yt-dlp
+
+      - name: Set format filter based on quality
+        id: format
+        run: |
+          QUALITY="${{ github.event.inputs.quality }}"
+          case "$QUALITY" in
+            "480p")  FORMAT="bestvideo[height<=480]+bestaudio/best[height<=480]" ;;
+            "720p")  FORMAT="bestvideo[height<=720]+bestaudio/best[height<=720]" ;;
+            "1080p") FORMAT="bestvideo[height<=1080]+bestaudio/best[height<=1080]" ;;
+            "Source (best)") FORMAT="bestvideo+bestaudio/best" ;;
+            *)       FORMAT="bestvideo[height<=720]+bestaudio/best[height<=720]" ;;
+          esac
+          echo "format=$FORMAT" >> $GITHUB_OUTPUT
+
+      - name: Download segments from start offset
+        run: |
+          cd "${{ steps.folder.outputs.name }}"
+          seg_sec=$(( ${{ github.event.inputs.segment_minutes }} * 60 ))
+          start_offset_sec=$(( ${{ github.event.inputs.start_minutes }} * 60 ))
+
+          segment=$(( start_offset_sec / seg_sec + 1 ))
+          start_time=$(( (segment-1) * seg_sec ))
+
+          echo "Resuming from segment $segment (start time ${start_time} seconds = $((start_time/60)) minutes)"
+
+          while true; do
+            end=$(( start_time + seg_sec ))
+            start_fmt=$(printf "%02d:%02d:%02d" $((start_time/3600)) $(((start_time%3600)/60)) $((start_time%60)))
+            end_fmt=$(printf "%02d:%02d:%02d" $((end/3600)) $(((end%3600)/60)) $((end%60)))
+            echo "=== Segment $segment: ${start_fmt} to ${end_fmt} (${seg_sec}s) ==="
+
+            yt-dlp \
+              --live-from-start \
+              --download-sections "*${start_fmt}-${end_fmt}" \
+              --force-keyframes-at-cuts \
+              --extractor-args "twitch:disable_ads" \
+              --format "${{ steps.format.outputs.format }}" \
+              --merge-output-format mp4 \
+              --output "segment_$(printf '%03d' $segment).mp4" \
+              --no-overwrites \
+              --retries 5 \
+              "https://twitch.tv/${{ github.event.inputs.channel_name }}"
+
+            if [ ! -s "segment_$(printf '%03d' $segment).mp4" ]; then
+              echo "Stream ended or segment empty, stopping."
+              rm -f "segment_$(printf '%03d' $segment).mp4"
+              break
+            fi
+
+            git add "segment_$(printf '%03d' $segment).mp4"
+            git commit -m "Segment $segment (${start_fmt}-${end_fmt}) ${{ github.event.inputs.quality }} from ${{ github.event.inputs.channel_name }}"
+            git push
+
+            segment=$((segment + 1))
+            start_time=$((start_time + seg_sec))
+
+            if [ "${{ github.event.inputs.max_segments }}" -ne 0 ] && [ $segment -gt ${{ github.event.inputs.max_segments }} ]; then
+              break
+            fi
+          done
